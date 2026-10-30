@@ -1,0 +1,33 @@
+id = "tr0st/multica"
+name = "Multica"
+version = "0.1.0"
+plugin_api = 43
+author = "tr0st"
+license = "MIT"
+icon = "robot"
+description = "Local Multica agents, running tasks, queue and live logs."
+tags = ["development", "monitoring", "agents"]
+dependencies = ["python3", "xdg-open"]
+
+[[setting]]
+key = "poll_seconds"
+type = "int"
+label_key = "settings.poll"
+default = 10
+min = 5
+max = 120
+
+[[widget]]
+id = "bar"
+entry = "widget.luau"
+
+[[service]]
+id = "monitor"
+entry = "service.luau"
+
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 720
+height = 720
+placement = "attached"
