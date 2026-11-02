@@ -109,6 +109,30 @@ now = 20000
 env.update()
 check(#pending == 0, "closed panel never polls logs")
 
+-- History and logs use the local labels supplied by the Python bridge.
+local recent = task("recent", "completed")
+recent.completed_at = "2026-11-02T11:00:00Z"
+recent.completed_at_local = "2026-11-02 14:00"
+snapshot.recent = { recent }
+env.onOpen()
+pressText("recent · 1")
+check(text("2026-11-02 14:00") ~= nil, "history card displays the machine-local time")
+check(text("2026-11-02 11:00 UTC") == nil, "history must not label raw UTC as local")
+key("recent").props.onClick()
+local first = message(40, "thinking", "Local ")
+first.created_at = "2026-11-02T11:00:00Z"
+first.created_at_local = "14:00:00"
+local second = message(41, "thinking", "time")
+second.created_at = "2026-11-02T11:00:01Z"
+second.created_at_local = "14:00:01"
+reply({ messages = { first, second, message(43) }, has_more = false })
+check(text("14:00:00 · message.thinking") ~= nil, "merged log block keeps its first local time")
+check(text("11:00:00 · message.thinking") == nil, "logs must not slice the raw UTC string")
+check(text("Local time") ~= nil, "timestamp changes preserve chunk merging")
+check(text("message.text") ~= nil, "missing timestamps omit the time without crashing")
+env.onClose()
+snapshot.recent = {}
+
 load(widgetSource)
 env.update()
 check(widgetText == "1/1", "bar shows running count and queue count")

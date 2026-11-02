@@ -3,8 +3,10 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 from pathlib import Path
+import re
 import socket
 import time
 from urllib.error import HTTPError, URLError
@@ -158,6 +160,34 @@ def belongs_here(task, agents, runtimes):
     return status in ACTIVE | RECENT and task.get("runtime_id") in runtimes
 
 
+RFC3339 = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"(?:\.([0-9]{1,9}))?(Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+)
+
+
+def local_timestamp(value, include_date=False):
+    """Format an API instant in this machine's zone, keeping raw values separate."""
+    if not isinstance(value, str):
+        return ""
+    match = RFC3339.fullmatch(value)
+    if match is None:
+        return ""
+    base, fraction, offset = match.groups()
+    # Normalize Go's RFC3339Nano precision for Python 3.10; display only
+    # seconds, but never round a timestamp into the next minute or day.
+    if fraction:
+        base += "." + fraction[:6].ljust(6, "0")
+    try:
+        instant = datetime.fromisoformat(base + ("+00:00" if offset == "Z" else offset))
+        # No fixed +3 or current-offset cache: libc resolves DST for
+        # this instant using the local machine's TZ / system zone.
+        local = instant.astimezone()
+        return local.strftime("%Y-%m-%d %H:%M" if include_date else "%H:%M:%S")
+    except (ValueError, OverflowError, OSError):
+        return ""
+
+
 def task_summary(client, workspace, task, agent):
     task_id = required_string(task, "id")
     ws_id = required_string(workspace, "id")
@@ -192,6 +222,7 @@ def task_summary(client, workspace, task, agent):
         "title": title, "identifier": identifier, "status": task["status"],
         "priority": task.get("priority") or 0, "created_at": task.get("created_at") or "",
         "started_at": task.get("started_at") or "", "completed_at": task.get("completed_at") or "",
+        "completed_at_local": local_timestamp(task.get("completed_at"), include_date=True),
         "url": link, "detail_error": detail_error,
     }
 
@@ -282,6 +313,7 @@ def log_page(messages, since=None, before=None):
         row = {"seq": message["seq"], "type": message.get("type") or "text",
                "text": text[:16000],
                "created_at": message.get("created_at") or "",
+               "created_at_local": local_timestamp(message.get("created_at")),
                "truncated": clipped}
         size = len(json.dumps(row, ensure_ascii=False).encode())
         if page and (used + size > MAX_LOG_BYTES or len(page) >= 60):
