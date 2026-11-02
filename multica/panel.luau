@@ -104,7 +104,7 @@ local function taskCard(task)
       label(statusText(task.status), running and "primary" or "on_surface_variant", 11),
     }),
     label(task.agent .. " · " .. task.workspace .. " · " .. profileName(task.profile), "on_surface_variant", 11),
-    task.completed_at ~= "" and label(task.completed_at:gsub("T", " "):sub(1, 16) .. " UTC", "on_surface_variant", 11) or ui.row({}, {}),
+    (task.completed_at_local or "") ~= "" and label(task.completed_at_local, "on_surface_variant", 11) or ui.row({}, {}),
     task.detail_error ~= "" and label(task.detail_error, "error", 11) or ui.row({}, {}),
   })
 end
@@ -162,12 +162,12 @@ local function logView()
       last.truncated = m.truncated
     else
       table.insert(blocks, { seq = m.seq, lastSeq = m.seq, type = m.type, text = m.text,
-        created_at = m.created_at, truncated = m.truncated })
+        created_at_local = m.created_at_local or "", truncated = m.truncated })
     end
   end
   for _, m in ipairs(blocks) do
     local content = m.text ~= "" and m.text or "…"
-    local title = (m.created_at ~= "" and m.created_at:sub(12, 19) .. " · " or "")
+    local title = (m.created_at_local ~= "" and m.created_at_local .. " · " or "")
       .. tr("message." .. m.type)
     local parts = {
       label(title, "primary", 11), label(content, "on_surface", 13),
