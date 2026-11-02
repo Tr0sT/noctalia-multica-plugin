@@ -1,0 +1,109 @@
+name: Prepare local time repair
+on:
+  push:
+    branches: [fix/local-history-time]
+    paths: [.github/workflows/prepare-local-time.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository == 'Tr0sT/noctalia-multica-plugin' && github.ref == 'refs/heads/fix/local-history-time'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Apply exact source edits
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              assert text.count(old) == 1, (path, old[:80], text.count(old))
+              p.write_text(text.replace(old, new))
+          replace('multica/bridge.py', 'from concurrent.futures import ThreadPoolExecutor\n', 'from concurrent.futures import ThreadPoolExecutor\nfrom datetime import datetime\n')
+          replace('multica/bridge.py', 'from pathlib import Path\n', 'from pathlib import Path\nimport re\n')
+          helper = '''RFC3339 = re.compile(
+              r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
+              r"(?:\\.([0-9]{1,9}))?(Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+          )
+
+
+          def local_timestamp(value, include_date=False):
+              """Format an API instant in this machine's zone, keeping raw values separate."""
+              if not isinstance(value, str):
+                  return ""
+              match = RFC3339.fullmatch(value)
+              if match is None:
+                  return ""
+              base, fraction, offset = match.groups()
+              # Normalize Go's RFC3339Nano precision for Python 3.10; display only
+              # seconds, but never round a timestamp into the next minute or day.
+              if fraction:
+                  base += "." + fraction[:6].ljust(6, "0")
+              try:
+                  instant = datetime.fromisoformat(base + ("+00:00" if offset == "Z" else offset))
+                  # No fixed +3 or current-offset cache: libc resolves DST for
+                  # this instant using the local machine's TZ / system zone.
+                  local = instant.astimezone()
+                  return local.strftime("%Y-%m-%d %H:%M" if include_date else "%H:%M:%S")
+              except (ValueError, OverflowError, OSError):
+                  return ""
+
+
+          '''
+          replace('multica/bridge.py', 'def task_summary(client, workspace, task, agent):\n', helper + 'def task_summary(client, workspace, task, agent):\n')
+          replace('multica/bridge.py', '        "url": link, "detail_error": detail_error,\n', '        "completed_at_local": local_timestamp(task.get("completed_at"), include_date=True),\n        "url": link, "detail_error": detail_error,\n')
+          replace('multica/bridge.py', '               "created_at": message.get("created_at") or "",\n', '               "created_at": message.get("created_at") or "",\n               "created_at_local": local_timestamp(message.get("created_at")),\n')
+          replace('multica/panel.luau', '    task.completed_at ~= "" and label(task.completed_at:gsub("T", " "):sub(1, 16) .. " UTC", "on_surface_variant", 11) or ui.row({}, {}),', '    (task.completed_at_local or "") ~= "" and label(task.completed_at_local, "on_surface_variant", 11) or ui.row({}, {}),')
+          replace('multica/panel.luau', '        created_at = m.created_at, truncated = m.truncated })', '        created_at_local = m.created_at_local or "", truncated = m.truncated })')
+          replace('multica/panel.luau', '    local title = (m.created_at ~= "" and m.created_at:sub(12, 19) .. " · " or "")', '    local title = (m.created_at_local ~= "" and m.created_at_local .. " · " or "")')
+          ui_tests = '''-- History and logs use the local labels supplied by the Python bridge.
+          local recent = task("recent", "completed")
+          recent.completed_at = "2026-11-02T11:00:00Z"
+          recent.completed_at_local = "2026-11-02 14:00"
+          snapshot.recent = { recent }
+          env.onOpen()
+          pressText("recent · 1")
+          check(text("2026-11-02 14:00") ~= nil, "history card displays the machine-local time")
+          check(text("2026-11-02 11:00 UTC") == nil, "history must not label raw UTC as local")
+          key("recent").props.onClick()
+          local first = message(40, "thinking", "Local ")
+          first.created_at = "2026-11-02T11:00:00Z"
+          first.created_at_local = "14:00:00"
+          local second = message(41, "thinking", "time")
+          second.created_at = "2026-11-02T11:00:01Z"
+          second.created_at_local = "14:00:01"
+          reply({ messages = { first, second, message(43) }, has_more = false })
+          check(text("14:00:00 · message.thinking") ~= nil, "merged log block keeps its first local time")
+          check(text("11:00:00 · message.thinking") == nil, "logs must not slice the raw UTC string")
+          check(text("Local time") ~= nil, "timestamp changes preserve chunk merging")
+          check(text("message.text") ~= nil, "missing timestamps omit the time without crashing")
+          env.onClose()
+          snapshot.recent = {}
+
+          '''
+          replace('tests/ui.luau', 'load(widgetSource)\n', ui_tests + 'load(widgetSource)\n')
+          for path in ('catalog.toml', 'multica/plugin.toml'):
+              replace(path, 'version = "0.1.0"', 'version = "0.1.1"')
+          replace('README.md', '## Скриншоты\n', 'Время завершения в истории и время сообщений показаны в локальном часовом поясе компьютера (с учётом даты и переходов на летнее время), а не в UTC. Например, 11:00 UTC отображается как 14:00 при UTC+3. Исходные timestamps не меняются; пустые, некорректные или не содержащие часового пояса значения не отображаются как время.\n\n## Скриншоты\n')
+          replace('README.md', 'Они не запускают агентские CLI.\n', 'Они не запускают агентские CLI. Тесты времени охватывают UTC+3, исходные смещения, дробные секунды, смену суток/года и DST. GitHub Actions запускает Python 3.10/3.13 и UI-harness с закреплённым Luau; это не проверка отрисовки в живой Noctalia.\n')
+          PY
+      - name: Verify Python regressions
+        run: |
+          python -m unittest discover -s tests -v
+          python -m compileall -q multica tests
+          git diff --check
+          git diff --stat
+      - name: Publish scoped repair to the same branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add multica/bridge.py multica/panel.luau multica/plugin.toml catalog.toml tests/ui.luau README.md
+          git commit -m 'fix: display history and log timestamps in the local timezone'
+          git push origin HEAD:refs/heads/fix/local-history-time
