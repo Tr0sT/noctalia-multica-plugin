@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Multica bridge. Credentials never leave this process."""
+"""Multica monitor and explicit daemon controls. Credentials stay in this process."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +7,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import shutil
 import socket
+import subprocess
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -243,15 +245,21 @@ def workspace_snapshot(client, ws, health_ws):
 
 
 def snapshot_profile(root, name):
-    result = {"name": name, "online": False, "errors": [], "agents": [], "tasks": []}
+    result = {"name": name, "online": False, "errors": [], "agents": [], "tasks": [],
+              "can_control": False, "control_error": "daemon.unavailable"}
     try:
         client = Client(root, name)
+        has_cli = shutil.which("multica") is not None
+        result.update(can_control=has_cli, control_error="" if has_cli else "daemon.cli-missing")
         health = local_health(client.directory, name)
         result.update(online=True, status=health["status"], device=health.get("device_name") or "",
                       running=health["running_task_count"], waiting=health["resource_wait_task_count"],
                       active=health["active_task_count"])
         if base_url(health.get("server_url")) != client.server:
+            result.update(can_control=False, control_error="daemon.server-mismatch")
             raise MonitorError("Daemon server differs from profile config; refresh the Multica profile")
+        if health.get("launched_by") == "desktop":
+            result.update(can_control=False, control_error="daemon.managed")
         workspaces = {required_string(w, "id"): w for w in object_list(client.get("/api/workspaces"))}
         health_workspaces = health.get("workspaces") or []
 
@@ -275,6 +283,63 @@ def snapshot_profile(root, name):
     except MonitorError as exc:
         result["errors"].append(str(exc))
     return result
+
+
+def daemon_control(root, name, action, allow_active=False):
+    """Use Multica's native lifecycle, scoped to one verified local profile."""
+    if action not in {"start", "stop"}:
+        raise MonitorError("daemon.invalid-action")
+    # The CLI uses the user's real profile directory; a diagnostic --root must
+    # never validate one set of profiles and then control a different set.
+    if root.resolve() != (Path.home() / ".multica").resolve():
+        raise MonitorError("daemon.invalid-root")
+    client = Client(root, name)
+    binary = shutil.which("multica")
+    if not binary:
+        raise MonitorError("daemon.cli-missing")
+    try:
+        health = local_health(client.directory, name)
+    except MonitorError:
+        if action == "stop":
+            raise MonitorError("daemon.unavailable") from None
+        health = None
+    if health is not None:
+        if base_url(health.get("server_url")) != client.server:
+            raise MonitorError("daemon.server-mismatch")
+        if health.get("launched_by") == "desktop":
+            raise MonitorError("daemon.managed")
+        if action == "start":
+            return {"ok": True, "profile": name, "action": action}
+        # A task can start after the last UI snapshot. Require confirmation
+        # against fresh local health, including tasks waiting for a directory.
+        if health["active_task_count"] > 0 and not allow_active:
+            return {"confirmation_required": True, "active": health["active_task_count"]}
+    try:
+        result = subprocess.run(
+            [binary, "--profile", name, "--server-url", client.server, "daemon", action],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            # Noctalia caps captured processes at 60 seconds. Leave room for
+            # the health preflight and one final check of a detached startup.
+            timeout=50, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # The detached daemon can outlive its CLI's readiness wait. A matching
+        # starting/running health response confirms acceptance, not readiness.
+        if action == "start":
+            try:
+                health = local_health(client.directory, name)
+                if base_url(health.get("server_url")) == client.server and health.get("launched_by") != "desktop":
+                    return {"ok": True, "profile": name, "action": action}
+            except MonitorError:
+                pass
+        raise MonitorError("daemon.timeout") from None
+    except OSError:
+        raise MonitorError("daemon.command-failed") from None
+    if result.returncode != 0:
+        # CLI errors may include profile details or startup log excerpts.
+        # Keep them out of the shared Noctalia state and process output.
+        raise MonitorError("daemon.command-failed")
+    return {"ok": True, "profile": name, "action": action}
 
 
 def snapshot(root):
@@ -342,17 +407,23 @@ def logs(root, name, workspace, task, since=None, before=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["snapshot", "logs"])
+    parser.add_argument("command", choices=["snapshot", "logs", "daemon"])
     parser.add_argument("--root", type=Path, default=Path.home() / ".multica")
     parser.add_argument("--profile", default="")
     parser.add_argument("--workspace")
     parser.add_argument("--task")
     parser.add_argument("--since", type=int)
     parser.add_argument("--before", type=int)
+    parser.add_argument("--action", choices=["start", "stop"])
+    parser.add_argument("--allow-active", action="store_true")
     args = parser.parse_args()
     try:
-        data = snapshot(args.root) if args.command == "snapshot" else logs(
-            args.root, args.profile, args.workspace, args.task, args.since, args.before)
+        if args.command == "snapshot":
+            data = snapshot(args.root)
+        elif args.command == "daemon":
+            data = daemon_control(args.root, args.profile, args.action, args.allow_active)
+        else:
+            data = logs(args.root, args.profile, args.workspace, args.task, args.since, args.before)
     except MonitorError as exc:
         data = {"error": str(exc)}
     print(json.dumps(data, ensure_ascii=False))

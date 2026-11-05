@@ -12,6 +12,7 @@ local scrollRev = 0
 local showRecent = false
 local followLive = true
 local nextSeq = nil
+local daemonActions = {}
 local render
 local loadLogs
 
@@ -30,7 +31,58 @@ local function statusText(status)
 end
 
 local function refresh()
-  noctalia.state.set("refresh", noctalia.nowMs())
+  local token = math.max(noctalia.nowMs(), (noctalia.state.get("refresh") or 0) + 1)
+  noctalia.state.set("refresh", token)
+  return token
+end
+
+local function staleSnapshot(data)
+  return not data or os.time() - data.updated_at > math.max(45, (noctalia.getConfig("poll_seconds") or 10) * 3)
+end
+
+local function controlUnavailable(data, profile)
+  local err = noctalia.state.get("error")
+  if staleSnapshot(data) or (err and err ~= "") then return tr("daemon.refresh-required") end
+  if not profile.can_control then return tr(profile.control_error or "daemon.cli-missing") end
+  return nil
+end
+
+local function controlDaemon(name, action, allowActive)
+  local data = noctalia.state.get("snapshot")
+  local profile = nil
+  for _, p in ipairs(data and data.profiles or {}) do
+    if p.name == name then profile = p; break end
+  end
+  local previous = daemonActions[name]
+  if not profile or controlUnavailable(data, profile) or (previous and previous.pending) then return end
+  if previous and previous.confirm and not allowActive then return end
+  if (action == "stop") ~= profile.online then render(); return end
+  if action == "stop" and not allowActive and (profile.active or 0) > 0 then
+    daemonActions[name] = { action = action, confirm = profile.active }
+    render()
+    return
+  end
+
+  local operation = { action = action, pending = true }
+  daemonActions[name] = operation
+  local args = { "daemon", "--profile", name, "--action", action }
+  if allowActive then table.insert(args, "--allow-active") end
+  render()
+  client.call(args, function(result, err)
+    if result and result.confirmation_required and type(result.active) == "number" and result.active > 0 then
+      operation.pending = false
+      if opened then operation.confirm = result.active else daemonActions[name] = nil end
+    else
+      if not err and (not result or result.ok ~= true or result.action ~= action or result.profile ~= name) then
+        err = tr("error.response")
+      end
+      operation.error = err
+      -- A command (including a timeout) does not establish the daemon's current state.
+      operation.refreshToken = math.max(noctalia.nowMs(), (noctalia.state.get("refresh") or 0) + 1)
+      noctalia.state.set("refresh", operation.refreshToken)
+    end
+    render()
+  end, 60000)
 end
 
 local function openTask(task)
@@ -117,12 +169,36 @@ local function overview(data)
   for _, p in ipairs(data.profiles) do
     local agentNames = {}
     for _, a in ipairs(p.agents) do table.insert(agentNames, a.name .. " · " .. a.workspace) end
+    local operation = daemonActions[p.name]
+    local pending = operation and operation.pending
+    local action = p.online and "stop" or "start"
+    local unavailable = controlUnavailable(data, p)
     local state = p.online and (p.status == "starting" and tr("starting") or tr("online")) or tr("offline")
     local parts = {
-      ui.row({ gap = 8 }, { label(profileName(p.name), "on_surface", 13), ui.spacer({ flexGrow = 1 }),
-        label(state, p.online and "primary" or "error", 11) }),
+      ui.row({ gap = 8, align = "center" }, { ui.label({ text = profileName(p.name), fontSize = 13, maxLines = 1, flexGrow = 1 }),
+        label(state, p.online and "primary" or "error", 11),
+        ui.button({ key = "daemon-control:" .. p.name,
+          text = tr(pending and (operation.action == "start" and "daemon.starting" or "daemon.stopping") or "daemon." .. action),
+          glyph = action == "stop" and "player-pause" or "player-play", variant = "ghost", controlSize = "sm",
+          enabled = unavailable == nil and not pending and not (operation and operation.confirm),
+          tooltip = unavailable or tr(pending and "daemon.checking" or "daemon." .. action .. "-tooltip"),
+          onClick = function() controlDaemon(p.name, action, false) end,
+        }),
+      }),
       label(#agentNames > 0 and table.concat(agentNames, "\n") or tr(#p.errors > 0 and "incomplete" or "no-agents"), "on_surface_variant", 11),
     }
+    if operation and operation.confirm then
+      table.insert(parts, label(tr("daemon.stop-warning") .. " " .. tostring(operation.confirm), "error", 12))
+      table.insert(parts, ui.row({ gap = 8 }, {
+        ui.spacer({ flexGrow = 1 }),
+        ui.button({ key = "daemon-cancel:" .. p.name, text = tr("daemon.cancel"), variant = "ghost", controlSize = "sm",
+          onClick = function() daemonActions[p.name] = nil; render() end }),
+        ui.button({ key = "daemon-confirm:" .. p.name, text = tr("daemon.confirm-stop"), glyph = "player-pause",
+          variant = "ghost", controlSize = "sm", enabled = unavailable == nil and p.online,
+          onClick = function() controlDaemon(p.name, "stop", true) end }),
+      }))
+    end
+    if operation and operation.error then table.insert(parts, label(operation.error, "error", 12)) end
     for _, err in ipairs(p.errors) do incomplete = true; table.insert(parts, label(err, "error", 12)) end
     table.insert(children, ui.column({ gap = 4, paddingV = 4 }, parts))
   end
@@ -205,7 +281,7 @@ render = function()
   if not opened then return end
   local data = noctalia.state.get("snapshot")
   local err = noctalia.state.get("error")
-  local stale = data and os.time() - data.updated_at > math.max(45, (noctalia.getConfig("poll_seconds") or 10) * 3)
+  local stale = data and staleSnapshot(data)
   panel.render(ui.column({ flexGrow = 1, padding = 8, gap = 12, align = "stretch" }, {
     ui.row({ gap = 10, align = "center" }, {
       ui.glyph({ name = "robot", color = "primary", size = 23 }),
@@ -243,10 +319,14 @@ function onClose()
   opened = false
   generation = generation + 1
   busy = false
+  for name, operation in pairs(daemonActions) do
+    if operation.confirm then daemonActions[name] = nil end
+  end
 end
 
 function update()
   if selected and followLive and noctalia.nowMs() - lastPoll >= 3000 then loadLogs("newer") end
+  if opened and not selected then render() end
 end
 
 noctalia.state.watch("snapshot", function(data)
@@ -258,3 +338,12 @@ noctalia.state.watch("snapshot", function(data)
   render()
 end)
 noctalia.state.watch("error", function() render() end)
+noctalia.state.watch("refresh_done", function(token)
+  for _, operation in pairs(daemonActions) do
+    if operation.refreshToken and token >= operation.refreshToken then
+      operation.pending = false
+      operation.refreshToken = nil
+    end
+  end
+  render()
+end)
