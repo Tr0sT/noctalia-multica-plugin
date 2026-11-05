@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -115,6 +116,142 @@ class SnapshotTests(unittest.TestCase):
                 result = bridge.snapshot_profile(root, "")
             get.assert_not_called()
             self.assertIn("differs", result["errors"][0])
+            self.assertFalse(result["can_control"])
+
+
+class DaemonControlTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.root = self.home / ".multica"
+        for directory in [self.root, self.root / "profiles/nord"]:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "config.json").write_text(json.dumps({
+                "server_url": "https://example.invalid", "token": "SECRET-TEST-CREDENTIAL"}))
+        self.health = {"status": "running", "profile": "nord", "pid": 23, "daemon_id": "local",
+                       "active_task_count": 0, "running_task_count": 0, "resource_wait_task_count": 0,
+                       "device_name": "pc", "server_url": "https://example.invalid", "workspaces": []}
+        for target, attribute, mock_name, kwargs in [
+            (bridge.Path, "home", "home_mock", {"return_value": self.home}),
+            (bridge.shutil, "which", "which", {"return_value": "/path with spaces/multica"}),
+            (bridge, "local_health", "local_health", {"return_value": self.health}),
+            (bridge.subprocess, "run", "run_cli", {"return_value": SimpleNamespace(returncode=0)}),
+        ]:
+            mocked = patch.object(target, attribute, **kwargs)
+            instance = mocked.start()
+            self.addCleanup(mocked.stop)
+            setattr(self, mock_name, instance)
+
+    def test_stop_rechecks_active_tasks_before_requesting_confirmation(self):
+        # The last UI snapshot may have been idle. Waiting tasks count too.
+        self.health.update(active_task_count=2, running_task_count=1, resource_wait_task_count=1)
+        result = bridge.daemon_control(self.root, "nord", "stop")
+        self.assertEqual({"confirmation_required": True, "active": 2}, result)
+        self.run_cli.assert_not_called()
+
+    def test_confirmed_stop_targets_exact_profile_without_shell_or_force(self):
+        self.health["active_task_count"] = 2
+        for profile in ["", "nord"]:
+            with self.subTest(profile=profile):
+                result = bridge.daemon_control(self.root, profile, "stop", allow_active=True)
+                self.assertTrue(result["ok"])
+                self.assertEqual(profile, result["profile"])
+                self.assertEqual(["/path with spaces/multica", "--profile", profile,
+                                  "--server-url", "https://example.invalid", "daemon", "stop"],
+                                 self.run_cli.call_args.args[0])
+                self.assertNotIn("--force", self.run_cli.call_args.args[0])
+                self.assertFalse(self.run_cli.call_args.kwargs.get("shell", False))
+                for stream in ["stdin", "stdout", "stderr"]:
+                    self.assertEqual(bridge.subprocess.DEVNULL, self.run_cli.call_args.kwargs[stream])
+                self.assertNotIn("SECRET", repr(self.run_cli.call_args))
+
+    def test_start_uses_background_cli_when_offline_and_is_noop_when_online(self):
+        self.local_health.side_effect = bridge.MonitorError("unavailable")
+        with patch.dict("os.environ", {"MULTICA_SERVER_URL": "https://different.invalid"}):
+            self.assertTrue(bridge.daemon_control(self.root, "nord", "start")["ok"])
+        self.assertEqual(["/path with spaces/multica", "--profile", "nord",
+                          "--server-url", "https://example.invalid", "daemon", "start"],
+                         self.run_cli.call_args.args[0])
+        self.run_cli.reset_mock()
+        self.local_health.side_effect = None
+        self.health["status"] = "starting"
+        self.assertTrue(bridge.daemon_control(self.root, "nord", "start")["ok"])
+        self.run_cli.assert_not_called()
+
+    def test_unverified_daemon_and_desktop_owned_daemon_cannot_be_stopped(self):
+        self.local_health.side_effect = bridge.MonitorError("profile identity does not match")
+        with self.assertRaisesRegex(bridge.MonitorError, "daemon.unavailable"):
+            bridge.daemon_control(self.root, "nord", "stop", allow_active=True)
+        self.local_health.side_effect = None
+        self.health["server_url"] = "https://different.invalid"
+        with self.assertRaisesRegex(bridge.MonitorError, "daemon.server-mismatch"):
+            bridge.daemon_control(self.root, "nord", "stop", allow_active=True)
+        self.health.update(server_url="https://example.invalid", launched_by="desktop")
+        for action in ["start", "stop"]:
+            with self.subTest(action=action), self.assertRaisesRegex(bridge.MonitorError, "daemon.managed"):
+                bridge.daemon_control(self.root, "nord", action, allow_active=True)
+        self.run_cli.assert_not_called()
+
+    def test_invalid_inputs_and_missing_cli_never_launch_a_process(self):
+        for root, name, action in [(self.home / "elsewhere", "nord", "start"),
+                                   (self.root, "../nord", "stop"),
+                                   (self.root, "nord", "restart"),
+                                   (self.root, "missing", "start")]:
+            with self.subTest(root=root, name=name, action=action), self.assertRaises(bridge.MonitorError):
+                bridge.daemon_control(root, name, action)
+        self.which.return_value = None
+        with self.assertRaisesRegex(bridge.MonitorError, "daemon.cli-missing"):
+            bridge.daemon_control(self.root, "nord", "stop")
+        self.run_cli.assert_not_called()
+
+    def test_command_failures_and_timeouts_do_not_expose_cli_output(self):
+        self.run_cli.return_value = SimpleNamespace(returncode=1, stderr="SECRET-TEST-CREDENTIAL")
+        with self.assertRaises(bridge.MonitorError) as failure:
+            bridge.daemon_control(self.root, "nord", "stop")
+        self.assertEqual("daemon.command-failed", str(failure.exception))
+        self.run_cli.side_effect = bridge.subprocess.TimeoutExpired("multica", 50, stderr="SECRET-TEST-CREDENTIAL")
+        with self.assertRaises(bridge.MonitorError) as timeout:
+            bridge.daemon_control(self.root, "nord", "stop")
+        self.assertEqual("daemon.timeout", str(timeout.exception))
+
+    def test_slow_detached_start_must_be_verified_before_acceptance(self):
+        self.run_cli.side_effect = bridge.subprocess.TimeoutExpired("multica", 50)
+        for final in [dict(self.health, status="starting"),
+                      dict(self.health, server_url="https://different.invalid"),
+                      bridge.MonitorError("unavailable")]:
+            self.local_health.side_effect = [bridge.MonitorError("unavailable"), final]
+            with self.subTest(final=final):
+                if isinstance(final, dict) and final.get("status") == "starting":
+                    self.assertTrue(bridge.daemon_control(self.root, "nord", "start")["ok"])
+                else:
+                    with self.assertRaisesRegex(bridge.MonitorError, "daemon.timeout"):
+                        bridge.daemon_control(self.root, "nord", "start")
+                self.assertEqual(50, self.run_cli.call_args.kwargs["timeout"])
+
+    def test_offline_profile_can_start_and_server_failure_does_not_disable_local_stop(self):
+        self.local_health.side_effect = bridge.MonitorError("unavailable")
+        offline = bridge.snapshot_profile(self.root, "nord")
+        self.assertFalse(offline["online"])
+        self.assertTrue(offline["can_control"])
+        self.local_health.side_effect = None
+        with patch.object(bridge.Client, "get", side_effect=bridge.MonitorError("HTTP 503")):
+            online = bridge.snapshot_profile(self.root, "nord")
+        self.assertTrue(online["online"])
+        self.assertTrue(online["can_control"])
+        self.assertIn("HTTP 503", online["errors"])
+
+    def test_snapshot_explains_disabled_controls(self):
+        with patch.object(bridge.Client, "get", return_value=[]):
+            self.which.return_value = None
+            missing = bridge.snapshot_profile(self.root, "nord")
+            self.assertFalse(missing["can_control"])
+            self.assertEqual("daemon.cli-missing", missing["control_error"])
+            self.which.return_value = "/path/multica"
+            self.health["launched_by"] = "desktop"
+            managed = bridge.snapshot_profile(self.root, "nord")
+            self.assertFalse(managed["can_control"])
+            self.assertEqual("daemon.managed", managed["control_error"])
 
 
 class LogTests(unittest.TestCase):

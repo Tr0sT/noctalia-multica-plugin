@@ -1,11 +1,11 @@
 id = "tr0st/multica"
 name = "Multica"
-version = "0.1.1"
+version = "0.2.0"
 plugin_api = 43
 author = "tr0st"
 license = "MIT"
 icon = "robot"
-description = "Local Multica agents, running tasks, queue and live logs."
+description = "Local Multica agents, daemon controls, tasks, queue and live logs."
 tags = ["development", "monitoring", "agents"]
 dependencies = ["python3", "xdg-open"]
 
