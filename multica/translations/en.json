@@ -61,5 +61,7 @@
   "message.text": "Model",
   "message.thinking": "Thinking",
   "message.reasoning": "Reasoning",
-  "message.error": "Error"
+  "message.error": "Error",
+  "restricted-task": "Restricted task",
+  "restricted-task-hint": "Details are hidden by project access rules."
 }
