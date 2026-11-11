@@ -195,9 +195,13 @@ def task_summary(client, workspace, task, agent):
     ws_id = required_string(workspace, "id")
     slug = workspace.get("slug") or ws_id
     link = client.app + "/" + quote(slug, safe="")
-    title = task.get("trigger_summary") or task.get("thread_name") or task.get("kind") or "Task"
+    restricted = task.get("restricted") is True
+    # Restricted project tasks retain runtime/presence fields, not readable transcripts.
+    title = "Task" if restricted else (task.get("trigger_summary") or task.get("thread_name") or task.get("kind") or "Task")
     identifier, detail_error = "", ""
-    if task.get("issue_id"):
+    if restricted:
+        link = ""
+    elif task.get("issue_id"):
         issue_id = quote(task["issue_id"], safe="")
         link += "/issues/" + issue_id
         try:
@@ -221,7 +225,7 @@ def task_summary(client, workspace, task, agent):
         "id": task_id, "key": client.name + ":" + task_id, "profile": client.name,
         "workspace_id": ws_id, "workspace": workspace.get("name") or slug,
         "agent": agent.get("name") or task["agent_id"], "agent_id": task["agent_id"],
-        "title": title, "identifier": identifier, "status": task["status"],
+        "title": title, "identifier": identifier, "status": task["status"], "restricted": restricted,
         "priority": task.get("priority") or 0, "created_at": task.get("created_at") or "",
         "started_at": task.get("started_at") or "", "completed_at": task.get("completed_at") or "",
         "completed_at_local": local_timestamp(task.get("completed_at"), include_date=True),
