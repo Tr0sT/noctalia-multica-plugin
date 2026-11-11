@@ -86,6 +86,7 @@ local function controlDaemon(name, action, allowActive)
 end
 
 local function openTask(task)
+  if task.restricted then render(); return end
   selected = task
   messages = {}
   nextSeq = nil
@@ -144,10 +145,10 @@ end
 
 local function taskCard(task)
   local running = task.status == "running"
-  local title = (task.identifier ~= "" and task.identifier .. " · " or "") .. task.title
+  local title = task.restricted and tr("restricted-task") or ((task.identifier ~= "" and task.identifier .. " · " or "") .. task.title)
   return ui.column({ key = task.key, gap = 5, padding = 12, radius = 10,
     fill = "surface_container", border = running and "primary" or "outline_variant", borderWidth = 1,
-    onClick = function() openTask(task) end,
+    onClick = not task.restricted and function() openTask(task) end or nil,
   }, {
     ui.row({ gap = 8, align = "center" }, {
       ui.glyph({ name = running and "player-play" or (task.status == "failed" and "alert-circle" or "robot"), size = 17,
@@ -156,6 +157,7 @@ local function taskCard(task)
       label(statusText(task.status), running and "primary" or "on_surface_variant", 11),
     }),
     label(task.agent .. " · " .. task.workspace .. " · " .. profileName(task.profile), "on_surface_variant", 11),
+    task.restricted and label(tr("restricted-task-hint"), "on_surface_variant", 11) or ui.row({}, {}),
     (task.completed_at_local or "") ~= "" and label(task.completed_at_local, "on_surface_variant", 11) or ui.row({}, {}),
     task.detail_error ~= "" and label(task.detail_error, "error", 11) or ui.row({}, {}),
   })

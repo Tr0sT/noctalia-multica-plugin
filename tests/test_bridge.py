@@ -46,6 +46,47 @@ class RuntimeScopeTests(unittest.TestCase):
                 bridge.profile_directory(Path("/tmp/profiles"), name)
 
 
+
+class RestrictedTaskTests(unittest.TestCase):
+    def test_private_project_run_keeps_presence_without_reading_hidden_metadata(self):
+        # Newer Multica emits a restricted projection for inaccessible projects.
+        # It intentionally retains agent/runtime/status, but denies transcript reads.
+        secret = "PRIVATE PROJECT TITLE"
+        restricted = {
+            "id": "task-private", "agent_id": "agent", "runtime_id": "local",
+            "status": "running", "restricted": True, "priority": 5,
+            "issue_id": "private-issue", "chat_session_id": "private-chat",
+            "trigger_summary": secret, "thread_name": secret, "kind": "hidden",
+            "created_at": "2026-11-11T01:00:00Z",
+        }
+        requests = []
+
+        def get(path, workspace=None):
+            requests.append((path, workspace))
+            if path == "/api/agents":
+                return [{"id": "agent", "name": "Worker", "runtime_id": "local"}]
+            if path == "/api/agent-task-snapshot":
+                return [restricted]
+            self.fail("Restricted task must not request its issue/chat metadata")
+
+        client = SimpleNamespace(app="https://example.invalid", name="", get=get)
+        workspace = {"id": "ws", "slug": "space", "name": "Workspace"}
+        tasks, agents = bridge.workspace_snapshot(
+            client, workspace, {"runtimes": ["local"]})
+        self.assertEqual(1, len(tasks))
+        self.assertEqual("running", tasks[0]["status"])
+        self.assertEqual("Worker", tasks[0]["agent"])
+        self.assertTrue(tasks[0]["restricted"])
+        self.assertEqual("Task", tasks[0]["title"])
+        self.assertEqual("", tasks[0]["identifier"])
+        self.assertEqual("", tasks[0]["url"])
+        self.assertEqual("", tasks[0]["detail_error"])
+        self.assertNotIn(secret, json.dumps(tasks))
+        self.assertEqual([
+            ("/api/agents", "ws"), ("/api/agent-task-snapshot", "ws")], requests)
+        self.assertEqual("Worker", agents[0]["name"])
+
+
 class HealthTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
