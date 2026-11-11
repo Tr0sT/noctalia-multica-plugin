@@ -136,6 +136,28 @@ check(text("message.text") ~= nil, "missing timestamps omit the time without cra
 env.onClose()
 snapshot.recent = {}
 
+-- Restricted tasks retain workload presence but never expose transcripts or
+-- private project titles, including when opened from an external context key.
+local previousActive = snapshot.active
+local restricted = task("restricted", "running")
+restricted.restricted = true
+restricted.title = "PRIVATE PROJECT TITLE"
+restricted.identifier = "PRIVATE-1"
+snapshot.active = { restricted }
+env.onOpen()
+check(text("restricted-task") ~= nil and text("restricted-task-hint") ~= nil,
+  "restricted task is visible with an explicit access boundary")
+check(text("PRIVATE PROJECT TITLE") == nil and text("PRIVATE-1") == nil,
+  "restricted card hides private title and identifier")
+check(key("restricted").props.onClick == nil and #pending == 0,
+  "restricted card cannot request an inaccessible task transcript")
+env.onClose()
+env.onOpen("restricted")
+check(text("restricted-task") ~= nil and #pending == 0,
+  "restricted task deep link stays on the safe overview")
+env.onClose()
+snapshot.active = previousActive
+
 -- Lifecycle controls act on exactly one profile and retain the last known state until refreshed.
 local primary = snapshot.profiles[1]
 local nord = { name = "nord", device = "pc", status = "stopped", running = 0, active = 0,
