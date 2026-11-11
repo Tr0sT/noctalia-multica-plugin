@@ -86,7 +86,7 @@ local function controlDaemon(name, action, allowActive)
 end
 
 local function openTask(task)
-  if task.restricted then return end
+  if task.restricted then render(); return end
   selected = task
   messages = {}
   nextSeq = nil
