@@ -61,5 +61,7 @@
   "message.text": "Модель",
   "message.thinking": "Размышления",
   "message.reasoning": "Рассуждения",
-  "message.error": "Ошибка"
+  "message.error": "Ошибка",
+  "restricted-task": "Задача с ограниченным доступом",
+  "restricted-task-hint": "Детали скрыты правами доступа к проекту."
 }
