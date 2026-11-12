@@ -93,17 +93,41 @@ def base_url(value):
 
 
 def profile_directory(root, name):
-    if not name:
+    if name == "":
         return root
-    if name in {".", ".."} or "/" in name or "\\" in name:
+    # Multica accepts nested named profiles (e.g. --profile team/dev).
+    # Keep path traversal and symlink escapes out of the profile boundary.
+    if not isinstance(name, str) or "\\\" in name or "\\0" in name:
         raise MonitorError("Invalid profile name")
-    return root / "profiles" / name
+    parts = name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise MonitorError("Invalid profile name")
+    profiles_root = root / "profiles"
+    directory = profiles_root.joinpath(*parts)
+    try:
+        if not directory.resolve().is_relative_to(profiles_root.resolve()):
+            raise MonitorError("Invalid profile name")
+    except (OSError, RuntimeError) as exc:
+        raise MonitorError("Invalid profile name") from exc
+    return directory
 
 
 def profile_names(root):
     names = [""] if (root / "config.json").exists() else []
-    names += sorted(p.name for p in (root / "profiles").glob("*") if (p / "config.json").is_file())
-    return names
+    profiles_root = root / "profiles"
+    for config in profiles_root.rglob("config.json"):
+        if not config.is_file():
+            continue
+        name = config.parent.relative_to(profiles_root).as_posix()
+        try:
+            profile_directory(root, name)
+            # A symlinked config must not escape the expected profiles tree.
+            if not config.resolve().is_relative_to(profiles_root.resolve()):
+                continue
+        except (MonitorError, OSError, RuntimeError):
+            continue
+        names.append(name)
+    return names[:1] + sorted(set(names[1:])) if names and names[0] == "" else sorted(set(names))
 
 
 def local_health(directory, name):
