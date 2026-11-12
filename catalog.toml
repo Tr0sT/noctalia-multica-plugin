@@ -1,7 +1,7 @@
 [[plugin]]
 id = "tr0st/multica"
 name = "Multica"
-version = "0.2.1"
+version = "0.2.2"
 plugin_api = 43
 author = "tr0st"
 license = "MIT"
