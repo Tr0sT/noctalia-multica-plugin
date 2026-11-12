@@ -113,7 +113,7 @@ def profile_directory(root, name):
 
 
 def profile_names(root):
-    names = [""] if (root / "config.json").exists() else []
+    names = []
     profiles_root = root / "profiles"
     for config in profiles_root.rglob("config.json"):
         if not config.is_file():
@@ -127,7 +127,7 @@ def profile_names(root):
         except (MonitorError, OSError, RuntimeError):
             continue
         names.append(name)
-    return names[:1] + sorted(set(names[1:])) if names and names[0] == "" else sorted(set(names))
+    return ([""] if (root / "config.json").exists() else []) + sorted(set(names))
 
 
 def local_health(directory, name):
