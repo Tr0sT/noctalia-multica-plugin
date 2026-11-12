@@ -47,6 +47,98 @@ class RuntimeScopeTests(unittest.TestCase):
 
 
 
+
+class NestedProfileTests(unittest.TestCase):
+    def test_discovers_nested_profiles_without_registering_parent_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.json").write_text("{}")
+            for name in ("flat", "team/dev", "team/prod"):
+                directory = root / "profiles" / name
+                directory.mkdir(parents=True)
+                (directory / "config.json").write_text("{}")
+            self.assertEqual(["", "flat", "team/dev", "team/prod"],
+                             bridge.profile_names(root))
+            self.assertEqual(root / "profiles" / "team" / "dev",
+                             bridge.profile_directory(root, "team/dev"))
+
+    def test_nested_profile_rejects_traversal_and_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external:
+            root = Path(tmp)
+            profiles = root / "profiles"
+            profiles.mkdir()
+            for name in ("..", "../other", "team/../prod", "team/./prod",
+                         "team//dev", "/tmp", "team\\dev", "team/\x00", "."):
+                with self.subTest(name=name), self.assertRaises(bridge.MonitorError):
+                    bridge.profile_directory(root, name)
+            (profiles / "escape").symlink_to(external, target_is_directory=True)
+            with self.assertRaises(bridge.MonitorError):
+                bridge.profile_directory(root, "escape/private")
+            (Path(external) / "config.json").write_text("{}")
+            (profiles / "linked.json").symlink_to(Path(external) / "config.json")
+            (profiles / "outsider").mkdir()
+            (profiles / "outsider" / "config.json").symlink_to(
+                Path(external) / "config.json")
+            self.assertEqual([], bridge.profile_names(root))
+
+    def test_nested_profiles_keep_local_runtime_and_queue_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            health_by_port = {}
+            for name, suffix, port in (("team/dev", "dev", 23001),
+                                       ("team/prod", "prod", 23002)):
+                directory = root / "profiles" / name
+                directory.mkdir(parents=True)
+                (directory / "config.json").write_text(json.dumps({
+                    "server_url": "https://example.invalid",
+                    "app_url": "https://example.invalid",
+                    "token": "synthetic-" + suffix,
+                }))
+                (directory / "daemon.port").write_text(
+                    json.dumps({"port": port, "pid": port}))
+                health_by_port[str(port)] = {
+                    "status": "running", "profile": name, "pid": port,
+                    "daemon_id": "daemon-" + suffix,
+                    "server_url": "https://example.invalid",
+                    "active_task_count": 1, "running_task_count": 1,
+                    "resource_wait_task_count": 0,
+                    "workspaces": [{"id": "ws", "runtimes": ["runtime-" + suffix]}],
+                }
+
+            def fake_request(url, token=None, workspace=None, local=False):
+                if local:
+                    return health_by_port[url.split(":")[-1].split("/")[0]]
+                suffix = token.removeprefix("synthetic-")
+                if url.endswith("/api/workspaces"):
+                    return [{"id": "ws", "name": "Synthetic", "slug": "synthetic"}]
+                if url.endswith("/api/agents"):
+                    return [{"id": "agent", "name": "Worker",
+                             "runtime_id": "runtime-" + suffix}]
+                if url.endswith("/api/agent-task-snapshot"):
+                    return [
+                        {"id": "active-" + suffix, "status": "running",
+                         "agent_id": "agent", "runtime_id": "runtime-" + suffix},
+                        {"id": "queued-" + suffix, "status": "queued",
+                         "agent_id": "agent", "runtime_id": "other"},
+                        {"id": "remote-" + suffix, "status": "running",
+                         "agent_id": "agent", "runtime_id": "other"},
+                    ]
+                self.fail("Unexpected API request " + url)
+
+            with patch.object(bridge, "request_json", side_effect=fake_request), \
+                 patch.object(bridge.shutil, "which", return_value=None):
+                snapshot = bridge.snapshot(root)
+            self.assertEqual(2, snapshot["running"])
+            self.assertCountEqual(
+                [("team/dev", "active-dev"), ("team/prod", "active-prod")],
+                [(t["profile"], t["id"]) for t in snapshot["active"]])
+            self.assertCountEqual(
+                [("team/dev", "queued-dev"), ("team/prod", "queued-prod")],
+                [(t["profile"], t["id"]) for t in snapshot["queue"]])
+            self.assertNotIn("remote-dev", json.dumps(snapshot))
+            self.assertNotIn("remote-prod", json.dumps(snapshot))
+
+
 class RestrictedTaskTests(unittest.TestCase):
     def test_private_project_run_keeps_presence_without_reading_hidden_metadata(self):
         # Newer Multica emits a restricted projection for inaccessible projects.
