@@ -97,7 +97,7 @@ def profile_directory(root, name):
         return root
     # Multica accepts nested named profiles (e.g. --profile team/dev).
     # Keep path traversal and symlink escapes out of the profile boundary.
-    if not isinstance(name, str) or "\\\" in name or "\\0" in name:
+    if not isinstance(name, str) or chr(92) in name or chr(0) in name:
         raise MonitorError("Invalid profile name")
     parts = name.split("/")
     if any(part in {"", ".", ".."} for part in parts):
