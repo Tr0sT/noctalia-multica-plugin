@@ -158,6 +158,35 @@ check(text("restricted-task") ~= nil and #pending == 0,
 env.onClose()
 snapshot.active = previousActive
 
+-- Access can be revoked after the transcript has been opened, including
+-- while another page of messages is in flight.
+env.onOpen()
+key("one").props.onClick()
+reply({ messages = { message(71, "text", "PREVIOUSLY VISIBLE") }, has_more = false })
+check(text("PREVIOUSLY VISIBLE") ~= nil, "authorized live transcript is initially visible")
+now = now + 4000
+env.update()
+check(#pending == 1 and pending[1].args[1] == "logs", "a live transcript fetch is in flight")
+local revokedRequest = table.remove(pending, 1)
+local revoked = task("one", "running")
+revoked.restricted = true
+revoked.title = "REVOKED PRIVATE TITLE"
+revoked.identifier = "SECRET-42"
+snapshot.active = { revoked, task("two", "dispatched") }
+host.state.set("snapshot", snapshot)
+check(text("PREVIOUSLY VISIBLE") == nil and text("restricted-task") ~= nil,
+  "new restricted snapshot immediately clears the already open transcript")
+check(text("REVOKED PRIVATE TITLE") == nil and text("SECRET-42") == nil
+  and key("one").props.onClick == nil, "revoked task exposes neither private metadata nor a log action")
+revokedRequest.callback({ messages = { message(72, "text", "LATE REVOKED TEXT") }, has_more = false }, nil)
+check(text("LATE REVOKED TEXT") == nil and text("PREVIOUSLY VISIBLE") == nil,
+  "an in-flight response cannot restore the revoked transcript")
+now = now + 4000
+env.update()
+check(#pending == 0, "access revocation stops live transcript polling")
+env.onClose()
+snapshot.active = previousActive
+
 -- Lifecycle controls act on exactly one profile and retain the last known state until refreshed.
 local primary = snapshot.profiles[1]
 local nord = { name = "nord", device = "pc", status = "stopped", running = 0, active = 0,

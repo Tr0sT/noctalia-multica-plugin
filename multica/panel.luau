@@ -333,8 +333,28 @@ end
 
 noctalia.state.watch("snapshot", function(data)
   if selected then
+    local matchingTask = nil
     for _, list in ipairs({ data.active, data.queue, data.recent }) do
-      for _, task in ipairs(list) do if task.key == selected.key then selected = task end end
+      for _, task in ipairs(list) do
+        if task.key == selected.key then matchingTask = task; break end
+      end
+      if matchingTask then break end
+    end
+    if matchingTask then
+      if matchingTask.restricted then
+        -- An open transcript can become private after the last snapshot.
+        -- Revoke it immediately and invalidate any in-flight log callback.
+        generation = generation + 1
+        selected = nil
+        messages = {}
+        nextSeq = nil
+        hasOlder = false
+        logError = nil
+        busy = false
+        followLive = true
+      else
+        selected = matchingTask
+      end
     end
   end
   render()
